@@ -13,6 +13,7 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from history_manager import HistoryManager
 
 class VideoSelector:
     def __init__(self, root):
@@ -33,6 +34,7 @@ class VideoSelector:
         self.last_frame_time = 0
         self.total_frames = 0  # Add frame counter
         self.fps = 0
+        self.processing_lock = threading.Lock()  # Add thread synchronization lock
         
         # Tracking variables
         self.next_object_id = 0
@@ -104,6 +106,9 @@ class VideoSelector:
             'buses': 0.15,    # High bus ratio threshold
             'bikes': 0.1      # High bicycle/motorcycle ratio threshold
         }
+        
+        # Initialize history manager
+        self.history_manager = HistoryManager()
         
         # Create main container
         self.container = ttk.Frame(self.root)
@@ -188,6 +193,15 @@ class VideoSelector:
             style='Action.TButton'
         )
         self.stop_button.pack(side='left', padx=5)
+        
+        # Add history button
+        self.history_button = ttk.Button(
+            self.control_frame,
+            text="View History",
+            command=self.show_history_window,
+            style='Action.TButton'
+        )
+        self.history_button.pack(side='left', padx=5)
         
         # File info
         self.file_label = ttk.Label(
@@ -354,112 +368,124 @@ class VideoSelector:
 
     def process_frames(self):
         """Process video frames with vehicle tracking and line crossing detection"""
-        self.analysis_start_time = time.time()
-        frame_count = 0
-        last_time = time.time()
-        
-        while self.is_playing and self.cap is not None:
-            ret, frame = self.cap.read()
-            if not ret:
-                self.generate_traffic_report()
-                break
+        try:
+            self.analysis_start_time = time.time()
+            frame_count = 0
+            last_time = time.time()
             
-            # Set up counting line if not already done
-            if self.counting_line is None:
-                height, width = frame.shape[:2]
-                self.counting_line = [(0, int(height * self.line_position)), 
-                                    (width, int(height * self.line_position))]
-            
-            # Store frame height for speed estimation
-            if self.frame_height is None:
-                self.frame_height = frame.shape[0]
-            
-            # Perform detection
-            results = self.model(frame, classes=[1, 2, 3, 5, 7])
-            
-            # Convert detections to format for tracker
-            detections = []
-            detection_classes = {}
-            
-            # Process all detections from the model
-            for i, r in enumerate(results[0].boxes.data):
-                x1, y1, x2, y2, conf, cls = r
-                if conf > 0.5:  # Only track confident detections
-                    detections.append([float(x1), float(y1), float(x2), float(y2), float(conf)])
-                    detection_classes[i] = int(cls)
-            
-            # Process detections and update tracking
-            annotated_frame = frame.copy()
-            
-            if len(detections) > 0:
-                # Update tracker
-                tracked_objects = self.update_tracker(detections, detection_classes)
+            while self.is_playing and self.cap is not None and not self.stop_thread:
+                with self.processing_lock:  # Add lock for thread safety
+                    if self.cap is None:  # Double check cap under lock
+                        break
+                        
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        self.generate_traffic_report()
+                        break
                 
-                # Process tracked objects
-                for track_id, track_info in tracked_objects.items():
-                    bbox = track_info['bbox']
-                    class_id = track_info['class']
+                # Set up counting line if not already done
+                if self.counting_line is None:
+                    height, width = frame.shape[:2]
+                    self.counting_line = [(0, int(height * self.line_position)), 
+                                        (width, int(height * self.line_position))]
+                
+                # Store frame height for speed estimation
+                if self.frame_height is None:
+                    self.frame_height = frame.shape[0]
+                
+                # Perform detection
+                results = self.model(frame, classes=[1, 2, 3, 5, 7])
+                
+                # Convert detections to format for tracker
+                detections = []
+                detection_classes = {}
+                
+                # Process all detections from the model
+                for i, r in enumerate(results[0].boxes.data):
+                    x1, y1, x2, y2, conf, cls = r
+                    if conf > 0.5:  # Only track confident detections
+                        detections.append([float(x1), float(y1), float(x2), float(y2), float(conf)])
+                        detection_classes[i] = int(cls)
+                
+                # Process detections and update tracking
+                annotated_frame = frame.copy()
+                
+                if len(detections) > 0:
+                    # Update tracker
+                    tracked_objects = self.update_tracker(detections, detection_classes)
                     
-                    # Check line crossing
-                    if track_id not in self.crossed_vehicles:
-                        self.check_line_crossing(track_id, bbox, class_id)
-                    
-                    # Draw bounding box
-                    x1, y1, x2, y2 = map(int, bbox)
-                    color = (0, 255, 0) if track_id in self.crossed_vehicles else (0, 0, 255)
-                    thickness = 3 if track_id in self.crossed_vehicles else 2
-                    
-                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, thickness)
-                    
-                    # Add label with ID and class
-                    class_name = self.class_names.get(class_id, 'Unknown')
-                    label = f"ID:{track_id} {class_name}"
-                    if track_id in self.crossed_vehicles:
-                        label += " "
-                    
-                    # Draw label background
-                    (text_width, text_height), _ = cv2.getTextSize(
-                        label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2
-                    )
-                    cv2.rectangle(
+                    # Process tracked objects
+                    for track_id, track_info in tracked_objects.items():
+                        bbox = track_info['bbox']
+                        class_id = track_info['class']
+                        
+                        # Check line crossing
+                        if track_id not in self.crossed_vehicles:
+                            self.check_line_crossing(track_id, bbox, class_id)
+                        
+                        # Draw bounding box
+                        x1, y1, x2, y2 = map(int, bbox)
+                        color = (0, 255, 0) if track_id in self.crossed_vehicles else (0, 0, 255)
+                        thickness = 3 if track_id in self.crossed_vehicles else 2
+                        
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, thickness)
+                        
+                        # Add label with ID and class
+                        class_name = self.class_names.get(class_id, 'Unknown')
+                        label = f"ID:{track_id} {class_name}"
+                        if track_id in self.crossed_vehicles:
+                            label += " "
+                        
+                        # Draw label background
+                        (text_width, text_height), _ = cv2.getTextSize(
+                            label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2
+                        )
+                        cv2.rectangle(
+                            annotated_frame,
+                            (x1, y1 - text_height - 5),
+                            (x1 + text_width, y1),
+                            color,
+                            -1
+                        )
+                        
+                        # Draw label text
+                        cv2.putText(
+                            annotated_frame,
+                            label,
+                            (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (255, 255, 255),
+                            2
+                        )
+                
+                # Draw counting line
+                if self.counting_line:
+                    cv2.line(
                         annotated_frame,
-                        (x1, y1 - text_height - 5),
-                        (x1 + text_width, y1),
-                        color,
-                        -1
-                    )
-                    
-                    # Draw label text
-                    cv2.putText(
-                        annotated_frame,
-                        label,
-                        (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255),
+                        self.counting_line[0],
+                        self.counting_line[1],
+                        (0, 255, 0),
                         2
                     )
-            
-            # Draw counting line
-            if self.counting_line:
-                cv2.line(
-                    annotated_frame,
-                    self.counting_line[0],
-                    self.counting_line[1],
-                    (0, 255, 0),
-                    2
-                )
-            
-            # Add frame to queue
-            if not self.frame_queue.full():
-                self.frame_queue.put((annotated_frame, len(self.crossed_vehicles)))
-            
-            # Update analytics and insights
-            self.analyze_traffic_patterns()
-            
-            frame_count += 1
-        
-        self.cap.release()
+                
+                # Add frame to queue if still playing
+                if self.is_playing and not self.stop_thread:
+                    if not self.frame_queue.full():
+                        self.frame_queue.put((annotated_frame, len(self.crossed_vehicles)))
+                
+                frame_count += 1
+                
+            # Clean up
+            with self.processing_lock:
+                if self.cap is not None:
+                    self.cap.release()
+                    self.cap = None
+                
+        except Exception as e:
+            print(f"Error in process_frames: {str(e)}")
+        finally:
+            self.stop_thread = False
 
     def check_line_crossing(self, track_id, bbox, class_id):
         """Check if a vehicle has crossed the counting line"""
@@ -486,6 +512,13 @@ class VideoSelector:
         self.previous_positions[track_id] = center_y
 
     def select_video(self):
+        # If a video is currently playing, stop it first
+        if self.is_playing:
+            self.stop_video()
+            # Wait for the video to fully stop
+            if self.detection_thread:
+                self.detection_thread.join()
+        
         filetypes = (
             ('Video files', '*.mp4 *.avi *.mov'),
             ('All files', '*.*')
@@ -500,7 +533,6 @@ class VideoSelector:
             self.selected_file = filename
             self.file_label.config(text=f"Selected: {os.path.basename(filename)}")
             self.process_button.config(state='normal')
-            self.stop_video()
             
             # Reset analytics
             self.vehicle_counts.clear()
@@ -515,7 +547,12 @@ class VideoSelector:
             return
             
         try:
+            # Stop any existing video first
             self.stop_video()
+            if self.detection_thread and self.detection_thread.is_alive():
+                self.detection_thread.join()
+            
+            # Initialize video capture
             self.cap = cv2.VideoCapture(self.selected_file)
             if not self.cap.isOpened():
                 messagebox.showerror("Error", "Could not open the video file")
@@ -525,12 +562,17 @@ class VideoSelector:
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
             self.frame_delay = int(1000 / self.fps)
             
+            # Start new detection session
+            self.history_manager.start_session()
+            
+            # Reset flags
+            self.stop_thread = False
+            self.is_playing = True
+            self.paused = False
+            
             # Enable control buttons
             self.pause_button.config(state='normal')
             self.stop_button.config(state='normal')
-            
-            self.is_playing = True
-            self.paused = False
             
             # Start processing thread
             self.detection_thread = threading.Thread(target=self.process_frames)
@@ -596,24 +638,51 @@ class VideoSelector:
         self.pause_button.config(text="Resume" if self.paused else "Pause")
 
     def stop_video(self):
-        self.is_playing = False
-        self.paused = False
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-        
-        # Clear frame queue
-        while not self.frame_queue.empty():
-            self.frame_queue.get()
-        
-        self.video_frame.config(image='')
-        self.pause_button.config(state='disabled', text="Pause")
-        self.stop_button.config(state='disabled')
-        self.status_label.config(text="Ready")
-        
-        # Wait for detection thread to finish
-        if self.detection_thread and self.detection_thread.is_alive():
-            self.detection_thread.join()
+        """Safely stop video processing"""
+        try:
+            # Set flags to stop processing
+            self.stop_thread = True
+            self.is_playing = False
+            self.paused = False
+            
+            # Save session data if we were playing
+            if hasattr(self, 'analysis_start_time') and self.analysis_start_time:
+                metadata = {
+                    "video_file": self.selected_file,
+                    "duration": time.time() - self.analysis_start_time if self.analysis_start_time else 0,
+                    "total_vehicles": len(self.crossed_vehicles),
+                    "vehicle_distribution": dict(self.vehicle_counts)
+                }
+                self.history_manager.end_session(metadata)
+            
+            # Safely release video capture
+            with self.processing_lock:
+                if self.cap is not None:
+                    self.cap.release()
+                    self.cap = None
+            
+            # Clear frame queue
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except:
+                    pass
+            
+            # Reset UI
+            self.video_frame.config(image='')
+            self.pause_button.config(state='disabled', text="Pause")
+            self.stop_button.config(state='disabled')
+            self.status_label.config(text="Ready")
+            
+            # Reset analysis start time
+            self.analysis_start_time = None
+            
+            # Wait for detection thread to finish
+            if self.detection_thread and self.detection_thread.is_alive():
+                self.detection_thread.join(timeout=1.0)  # Wait up to 1 second
+                
+        except Exception as e:
+            print(f"Error in stop_video: {str(e)}")
 
     def setup_counting_line(self, height, width):
         self.counting_line = [(0, int(height * self.line_position)), (width, int(height * self.line_position))]
@@ -905,6 +974,82 @@ class VideoSelector:
         self.recommendations_text.insert(tk.END, f"• Total Vehicles: {total_vehicles}\n")
         self.recommendations_text.insert(tk.END, f"• Average Flow: {avg_flow_rate:.1f} vehicles/hour\n")
         self.recommendations_text.insert(tk.END, f"• Peak Congestion: {peak_congestion:.2f}\n")
+
+    def add_detection_to_history(self, timestamp, vehicle_counts, vehicle_speeds, congestion_level):
+        """Add detection to history"""
+        self.history_manager.add_detection(
+            timestamp=timestamp,
+            vehicle_counts=vehicle_counts,
+            vehicle_speeds=vehicle_speeds,
+            congestion_level=congestion_level
+        )
+
+    def show_history_window(self):
+        """Show history viewer window"""
+        history_window = tk.Toplevel(self.root)
+        history_window.title("Detection History")
+        history_window.geometry("800x600")
+        
+        # Get session history
+        sessions = self.history_manager.get_session_history(limit=10)
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(history_window)
+        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Sessions tab
+        sessions_frame = ttk.Frame(notebook)
+        notebook.add(sessions_frame, text="Recent Sessions")
+        
+        # Create treeview for sessions
+        columns = ("Date", "Duration", "Total Vehicles", "File")
+        tree = ttk.Treeview(sessions_frame, columns=columns, show='headings')
+        
+        # Set column headings
+        for col in columns:
+            tree.heading(col, text=col)
+            tree.column(col, width=150)
+        
+        # Add sessions to treeview
+        for session in sessions:
+            metadata = session["metadata"]
+            date = datetime.datetime.strptime(session["session_id"], "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+            duration = f"{metadata['duration']:.1f}s"
+            total = metadata["total_vehicles"]
+            file = os.path.basename(metadata["video_file"])
+            tree.insert("", "end", values=(date, duration, total, file))
+        
+        tree.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Patterns tab
+        patterns_frame = ttk.Frame(notebook)
+        notebook.add(patterns_frame, text="Traffic Patterns")
+        
+        # Get historical patterns
+        patterns = self.history_manager.get_historical_patterns()
+        
+        # Create matplotlib figure for patterns
+        fig = Figure(figsize=(8, 6))
+        
+        # Peak hours plot
+        ax1 = fig.add_subplot(211)
+        hours = list(patterns["peak_hours"].keys())
+        counts = list(patterns["peak_hours"].values())
+        ax1.bar(hours, counts)
+        ax1.set_title("Peak Hours Distribution")
+        ax1.set_xlabel("Hour of Day")
+        ax1.set_ylabel("Total Vehicles")
+        
+        # Vehicle distribution plot
+        ax2 = fig.add_subplot(212)
+        vehicle_types = list(patterns["vehicle_distribution"].keys())
+        type_counts = list(patterns["vehicle_distribution"].values())
+        ax2.pie(type_counts, labels=vehicle_types, autopct='%1.1f%%')
+        ax2.set_title("Vehicle Type Distribution")
+        
+        canvas = FigureCanvasTkAgg(fig, master=patterns_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True, padx=5, pady=5)
 
 def main():
     root = tk.Tk()
