@@ -17,7 +17,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 class VideoSelector:
     def __init__(self, root):
         self.root = root
-        self.root.title("Traffic Analysis System")
+        self.root.title("VISTA - Traffic Analysis System")
         self.root.geometry("1200x800")
         self.root.configure(bg='#f0f0f0')
         
