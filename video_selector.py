@@ -137,7 +137,7 @@ class VideoSelector:
         # Title
         self.title_label = ttk.Label(
             self.left_panel,
-            text="Traffic Analysis System",
+            text="VISTA - Traffic Analysis System",
             font=("Arial", 16, "bold")
         )
         self.title_label.pack(pady=10)
