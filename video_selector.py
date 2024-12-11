@@ -80,6 +80,10 @@ class VideoSelector:
         self.output_dir = "traffic_reports"
         os.makedirs(self.output_dir, exist_ok=True)
         
+        # Line crossing parameters
+        self.counting_line = None
+        self.line_position = 0.7  # Line at 70% of frame height
+        
         # Class names mapping
         self.class_names = {
             1: 'bicycle',
@@ -88,10 +92,6 @@ class VideoSelector:
             5: 'bus',
             7: 'truck'
         }
-        
-        # Line crossing parameters
-        self.counting_line = None
-        self.line_position = 0.5  # Line at 50% of frame height
         
         # Traffic analysis thresholds
         self.congestion_levels = {
